@@ -1,6 +1,7 @@
 'use server'
 import OpenAI from "openai"
 import prisma from "./db"
+import { revalidatePath } from "next/cache"
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
@@ -16,10 +17,15 @@ export const generateChatResponse = async(chatMessage)=>{
                 ...chatMessage
             ],
             model: 'gpt-3.5-turbo',
-            temperature: 0
+            temperature: 0,
+            max_tokens: 100
         })
-        return response.choices[0].message
+        return {
+            message:response.choices[0].message,
+            tokens: response.usage.total_tokens
+        }
     } catch (error) {
+        console.log(error)
         return null
     }
 }
@@ -35,7 +41,7 @@ Once you have a list, create a one-day tour. Response should be  in the followin
     "country": "${country}",
     "title": "title of the tour",
     "description": "short description of the city and tour",
-    "stops": ["short paragraph on the stop 1 ", "short paragraph on the stop 2","short paragraph on the stop 3"]
+    "stops": ["stop name ", "stop name", "stop name"]
   }
 }
 "stops" property should include only three stops.
@@ -56,7 +62,7 @@ If you can't find info on exact ${city}, or ${city} does not exist, or it's popu
         if(!tourData.tour){
             return null
         }
-        return tourData.tour
+        return { tour: tourData.tour, tokens:response.usage.total_tokens }
     } catch (error) {
         console.log(error)
         return null
@@ -64,19 +70,116 @@ If you can't find info on exact ${city}, or ${city} does not exist, or it's popu
 }
 
 export const createNewTour = async(tour)=>{
-    console.log('create new tour',tour)
     return prisma.tour.create({
         data: tour
     })
 }
 
-export const getExistingTour = async({city, country})=>{
+
+export const getExistingTour = async ({ city, country }) => {
+    city = city.charAt(0).toUpperCase() + city.slice(1)
+    country = country.charAt(0).toUpperCase() + country.slice(1)
+    return prisma.tour.findUnique({
+      where: {
+        city_country: {
+          city,
+          country,
+        },
+      },
+    });
+  };
+
+export const getAllTours = async(searchTerm)=>{
+    if(!searchTerm){
+        const tours = await prisma.tour.findMany({
+            orderBy:{
+                city: 'asc'
+            }
+        })
+        return tours
+    }
+    const tours = await prisma.tour.findMany({
+        where:{
+            OR:[
+                {
+                    city:{
+                        contains: searchTerm
+                    },
+                },
+                {
+                    country:{
+                        contains:searchTerm
+                    }
+                }
+            ]
+        },
+        orderBy:{
+            city: 'asc'
+        }
+    })
+    return tours
+}
+
+export async function getSingleTour(id){
     return prisma.tour.findUnique({
         where:{
-            city_country:{
-                city,
-                country
+            id,
+        }
+    })
+}
+
+
+export const generateTourImage = async({city, country})=>{
+    try {
+        const tourImage = await openai.images.generate({
+            prompt: `a panoramic view of the ${city} ${country}`,
+            n:1,
+            size: '512x512'
+        })
+        return tourImage?.data[0]?.url
+    } catch (error) {
+        return null
+    }
+}
+
+export const fetchUserTokensById = async(clerkId)=>{
+    const result = await prisma.token.findUnique({
+        where:{
+            clerkId
+        }
+    })
+    return result?.tokens
+}
+
+export const generateUserTokensForId = async(clerkId)=>{
+    const result = await prisma.token.create({
+        data:{
+            clerkId
+        }
+    })
+    return result?.tokens
+}
+
+
+export const fetchOrGenerateTokens = async(clerkId)=>{
+    const result = await fetchUserTokensById(clerkId)
+    if(result){
+        return result.tokens
+    }
+    return (await generateUserTokensForId(clerkId)).tokens
+}
+
+export const subtractTokens = async(clerkId, tokens)=>{
+    const result = await prisma.token.update({
+        where:{
+            clerkId
+        },
+        data:{
+            tokens:{
+                decrement:tokens
             }
         }
     })
+    revalidatePath('/profile')
+    return result.tokens
 }
